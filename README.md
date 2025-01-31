@@ -2,4 +2,6 @@
 
 # Build and upload
 
-`pio run --target upload`
+```
+pio run --target upload
+```

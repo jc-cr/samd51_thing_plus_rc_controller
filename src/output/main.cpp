@@ -1,9 +1,10 @@
 #include <Arduino.h>
 #include <wiring_private.h>
 
-// DAC resolution
+// DAC resolution and values
 #define DAC_RESOLUTION    12      // 12-bit DAC
-#define DAC_MAX_VALUE    4095    // 2^12 - 1
+#define DAC_MAX_VALUE    4095    // Full 12-bit range
+#define DAC_CENTER_VALUE 1817    // Value for 1.25V output (2.5V after gain)
 
 // SBUS values
 #define SBUS_MAX_VALUE   2047    
@@ -12,7 +13,7 @@
 
 // Motor control settings
 #define MOTOR_DEADBAND   20      // Deadband around center point
-#define CONTROL_SMOOTHING 0.5    // No smoothing for direct control
+#define CONTROL_SMOOTHING 0.5    // Smoothing factor for control
 
 // Structure to hold motor control data
 struct MotorControl {
@@ -23,41 +24,50 @@ struct MotorControl {
 };
 
 // Motor controls
-MotorControl motor1 = {SBUS_MID_VALUE, SBUS_MID_VALUE, 2048, PIN_DAC0};  // Left track
-MotorControl motor2 = {SBUS_MID_VALUE, SBUS_MID_VALUE, 2048, PIN_DAC1};  // Right track
+MotorControl motor1 = {SBUS_MID_VALUE, SBUS_MID_VALUE, DAC_CENTER_VALUE, PIN_DAC0};  // Left track
+MotorControl motor2 = {SBUS_MID_VALUE, SBUS_MID_VALUE, DAC_CENTER_VALUE, PIN_DAC1};  // Right track
 
 void setupDAC() {
     analogWriteResolution(DAC_RESOLUTION);
-    
-    // Initialize DACs to middle position (half of max DAC value)
-    analogWrite(motor1.dac_pin, DAC_MAX_VALUE / 2);
-    analogWrite(motor2.dac_pin, DAC_MAX_VALUE / 2);
+    analogWrite(motor1.dac_pin, DAC_CENTER_VALUE);
+    analogWrite(motor2.dac_pin, DAC_CENTER_VALUE);
 }
 
-void updateMotor(MotorControl &motor, uint16_t new_value) {
-    // Apply smoothing (currently disabled)
+void updateMotor(MotorControl &motor, uint16_t new_value, bool is_ch3) {
+    // Apply smoothing
     motor.filtered_value = (motor.filtered_value * CONTROL_SMOOTHING) + 
                           (new_value * (1.0 - CONTROL_SMOOTHING));
     
     // Apply deadband around center
     float offset = motor.filtered_value - SBUS_MID_VALUE;
     if (abs(offset) < MOTOR_DEADBAND) {
-        motor.dac_value = DAC_MAX_VALUE / 2;  // Center position
+        motor.dac_value = DAC_CENTER_VALUE;  // Center position (2.5V after gain)
         return;
     }
     
     // Map SBUS range to DAC range with INVERTED output
-    // Higher SBUS value = Lower voltage (Lower DAC value)
     if (motor.filtered_value > SBUS_MID_VALUE) {
-        // Upper half of range (SBUS > mid) = Lower half of voltage
-        motor.dac_value = map(motor.filtered_value,
-                            SBUS_MID_VALUE, SBUS_MAX_VALUE,
-                            DAC_MAX_VALUE/2, 0);  // Map to lower voltages
+        // For CH3, swap the range to fix direction
+        if (is_ch3) {
+            motor.dac_value = map(motor.filtered_value,
+                                SBUS_MID_VALUE, SBUS_MAX_VALUE,
+                                DAC_CENTER_VALUE, DAC_MAX_VALUE);  // Map to higher voltages
+        } else {
+            motor.dac_value = map(motor.filtered_value,
+                                SBUS_MID_VALUE, SBUS_MAX_VALUE,
+                                DAC_CENTER_VALUE, 0);  // Map to lower voltages
+        }
     } else {
-        // Lower half of range (SBUS < mid) = Upper half of voltage
-        motor.dac_value = map(motor.filtered_value,
-                            SBUS_MIN_VALUE, SBUS_MID_VALUE,
-                            DAC_MAX_VALUE, DAC_MAX_VALUE/2);  // Map to higher voltages
+        // For CH3, swap the range to fix direction
+        if (is_ch3) {
+            motor.dac_value = map(motor.filtered_value,
+                                SBUS_MIN_VALUE, SBUS_MID_VALUE,
+                                0, DAC_CENTER_VALUE);  // Map to lower voltages
+        } else {
+            motor.dac_value = map(motor.filtered_value,
+                                SBUS_MIN_VALUE, SBUS_MID_VALUE,
+                                DAC_MAX_VALUE, DAC_CENTER_VALUE);  // Map to higher voltages
+        }
     }
     
     // Write to DAC
@@ -106,18 +116,24 @@ void loop() {
             
             if (buffer_index == 25) {
                 if (sbus_buffer[0] == 0x0F && !(sbus_buffer[23] & 0x08)) {
-                    // Get channel 1 & 3 values for tank controls
                     uint16_t ch1_value = processSBUSFrame(sbus_buffer, 0);  // Left track
                     uint16_t ch3_value = processSBUSFrame(sbus_buffer, 2);  // Right track (CH3)
                     
-                    updateMotor(motor1, ch1_value);
-                    updateMotor(motor2, ch3_value);
+                    updateMotor(motor1, ch1_value, false);  // CH1
+                    updateMotor(motor2, ch3_value, true);   // CH3
                     
                     // Debug output
+                    float dac_v1 = (motor1.dac_value * 2.82) / 4095.0;  // DAC voltage
+                    float dac_v2 = (motor2.dac_value * 2.82) / 4095.0;
+                    float out_v1 = dac_v1 * 2.0;  // After gain
+                    float out_v2 = dac_v2 * 2.0;
+                    
                     Serial.print("Left(CH1): "); Serial.print(ch1_value);
                     Serial.print(" DAC_L: "); Serial.print(motor1.dac_value);
+                    Serial.print(" V_L: "); Serial.print(out_v1);
                     Serial.print(" Right(CH3): "); Serial.print(ch3_value);
-                    Serial.print(" DAC_R: "); Serial.println(motor2.dac_value);
+                    Serial.print(" DAC_R: "); Serial.print(motor2.dac_value);
+                    Serial.print(" V_R: "); Serial.println(out_v2);
                 }
             }
         }
